@@ -1,0 +1,18 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "4ff689babb7ebad3d17db9926a2d6121"
+name = "Middleware MeLi"
+application_url = "https://middleware-meli.vercel.app"
+embedded = true
+
+[webhooks]
+api_version = "2026-04"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_orders,write_orders,read_payment_customizations,write_payment_customizations,read_products"
+optional_scopes = [ ]
+use_legacy_install_flow = true
+
+[auth]
+redirect_urls = ["https://middleware-meli.vercel.app/api/auth/callback"]

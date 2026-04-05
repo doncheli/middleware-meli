@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getPaymentStatus, verifyMercadoPagoWebhook } from "@/lib/mercadopago";
-import { resolvePaymentSession } from "@/lib/shopify";
+import { markOrderAsPaid, addOrderNote } from "@/lib/shopify";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,8 +9,8 @@ export const dynamic = "force-dynamic";
 /**
  * Webhook de notificación de MercadoPago.
  *
- * Recibe la notificación de estado de pago,
- * actualiza la transacción y resuelve la sesión en Shopify.
+ * Cuando el cliente paga, MercadoPago notifica aquí.
+ * El middleware actualiza la transacción y marca la orden como pagada en Shopify.
  */
 export async function POST(request: NextRequest) {
   let body: MercadoPagoWebhookPayload;
@@ -95,21 +95,33 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 5. Resolver sesión de pago en Shopify
-    if (newStatus === "approved" || newStatus === "rejected") {
+    // 5. Si fue aprobado → marcar orden como pagada en Shopify
+    if (newStatus === "approved") {
       try {
-        await resolvePaymentSession({
-          paymentSessionId: transaction.shopifyOrderId,
-          gid: `gid://shopify/PaymentSession/${transaction.shopifyOrderId}`,
-          action: newStatus === "approved" ? "resolve" : "reject",
-          reason:
-            newStatus === "rejected"
-              ? `MercadoPago: ${paymentInfo.statusDetail}`
-              : undefined,
+        await markOrderAsPaid({
+          orderId: transaction.shopifyOrderId,
+          amountCop: Number(transaction.amountCop),
+          mpPaymentId: paymentId,
+        });
+
+        await addOrderNote({
+          orderId: transaction.shopifyOrderId,
+          note: `✅ Pago confirmado por MercadoPago\nID: ${paymentId}\nMonto: COP ${Number(transaction.amountCop).toLocaleString()}`,
         });
       } catch (shopifyError) {
-        console.error("Error resolviendo sesión en Shopify:", shopifyError);
-        // No fallar el webhook por error de Shopify, ya actualizamos BD
+        console.error("Error marcando orden como pagada en Shopify:", shopifyError);
+      }
+    }
+
+    // 6. Si fue rechazado → agregar nota a la orden
+    if (newStatus === "rejected") {
+      try {
+        await addOrderNote({
+          orderId: transaction.shopifyOrderId,
+          note: `❌ Pago rechazado por MercadoPago\nMotivo: ${paymentInfo.statusDetail}`,
+        });
+      } catch (noteError) {
+        console.error("Error agregando nota de rechazo:", noteError);
       }
     }
 

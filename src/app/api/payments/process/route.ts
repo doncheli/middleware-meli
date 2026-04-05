@@ -2,17 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getCurrentRate } from "@/lib/exchange-rate";
 import { convertUsdToCop } from "@/lib/currency";
-import { verifyShopifyWebhook } from "@/lib/shopify";
+import { verifyShopifyWebhook, addOrderNote } from "@/lib/shopify";
 import { createPaymentPreference } from "@/lib/mercadopago";
+import type { ShopifyOrder } from "@/lib/shopify";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Shopify Payment App — payment_sessions/create
+ * Webhook: orders/create
  *
- * Recibe la solicitud de pago desde Shopify (monto en USD),
- * convierte a COP y crea una preferencia en MercadoPago.
+ * Shopify envía este webhook cuando se crea una nueva orden.
+ * El middleware convierte el monto USD → COP y crea una preferencia
+ * de pago en MercadoPago, luego guarda el link de pago.
  */
 export async function POST(request: NextRequest) {
   let rawBody: string;
@@ -42,26 +44,21 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  let payload: ShopifyPaymentSessionPayload;
+  let order: ShopifyOrder;
   try {
-    payload = JSON.parse(rawBody);
+    order = JSON.parse(rawBody);
   } catch {
     return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
   }
 
-  const { id: paymentSessionId, amount, currency, customer } = payload;
-
-  // Validar que el monto viene en USD
-  if (currency !== "USD") {
-    console.warn(`Moneda inesperada: ${currency}, se esperaba USD`);
+  // Ignorar órdenes ya pagadas
+  if (order.financial_status === "paid") {
+    return NextResponse.json({ received: true, skipped: "already_paid" });
   }
 
-  const amountUsd = parseFloat(amount);
+  const amountUsd = parseFloat(order.total_price);
   if (isNaN(amountUsd) || amountUsd <= 0) {
-    return NextResponse.json(
-      { error: "Monto inválido" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Monto inválido" }, { status: 400 });
   }
 
   try {
@@ -74,7 +71,7 @@ export async function POST(request: NextRequest) {
     // 3. Registrar transacción en BD
     const transaction = await prisma.transaction.create({
       data: {
-        shopifyOrderId: paymentSessionId,
+        shopifyOrderId: String(order.id),
         amountUsd,
         exchangeRate: rate,
         amountCop,
@@ -82,16 +79,16 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 4. Crear preferencia en MercadoPago
+    // 4. Crear preferencia en MercadoPago con monto en COP
     const preference = await createPaymentPreference({
       transactionId: transaction.id,
-      title: `Orden Shopify #${paymentSessionId}`,
+      title: `Orden ${order.name}`,
       amountCop,
-      shopifyOrderId: paymentSessionId,
-      buyerEmail: customer?.email,
+      shopifyOrderId: String(order.id),
+      buyerEmail: order.customer?.email || order.email,
     });
 
-    // 5. Actualizar transacción con ID de MercadoPago
+    // 5. Actualizar transacción con ID de preferencia
     await prisma.transaction.update({
       where: { id: transaction.id },
       data: {
@@ -100,50 +97,29 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 6. Retornar redirect a MercadoPago
+    // 6. Agregar nota a la orden con detalles de conversión
+    await addOrderNote({
+      orderId: String(order.id),
+      note: `💱 Conversión: USD ${amountUsd} × ${rate} = COP ${amountCop.toLocaleString()}\n🔗 Pago MercadoPago: ${preference.initPoint}`,
+    });
+
     return NextResponse.json({
-      redirect_url: preference.initPoint,
+      received: true,
+      transactionId: transaction.id,
+      amountUsd,
+      amountCop,
+      rate,
+      paymentUrl: preference.initPoint,
     });
   } catch (error) {
-    console.error("Error procesando pago:", error);
+    console.error("Error procesando orden:", error);
 
     return NextResponse.json(
       {
-        error: "Error procesando pago",
+        error: "Error procesando orden",
         detail: error instanceof Error ? error.message : "Error desconocido",
       },
       { status: 500 }
     );
   }
-}
-
-interface ShopifyPaymentSessionPayload {
-  id: string;
-  gid: string;
-  group: string;
-  amount: string;
-  currency: string;
-  test: boolean;
-  merchant_locale: string;
-  payment_method: {
-    type: string;
-    data: Record<string, unknown>;
-  };
-  customer?: {
-    email?: string;
-    phone_number?: string;
-    locale: string;
-    billing_address: {
-      given_name: string;
-      family_name: string;
-      line1: string;
-      line2?: string;
-      city: string;
-      postal_code: string;
-      province?: string;
-      country_code: string;
-      company?: string;
-    };
-  };
-  kind: string;
 }

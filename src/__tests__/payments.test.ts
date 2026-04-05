@@ -31,7 +31,8 @@ vi.mock("@/lib/mercadopago", () => ({
 
 vi.mock("@/lib/shopify", () => ({
   verifyShopifyWebhook: vi.fn(),
-  resolvePaymentSession: vi.fn(),
+  markOrderAsPaid: vi.fn(),
+  addOrderNote: vi.fn(),
   getShopifyProducts: vi.fn(),
 }));
 

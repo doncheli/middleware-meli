@@ -35,7 +35,8 @@ vi.mock("@/lib/mercadopago", () => ({
 
 vi.mock("@/lib/shopify", () => ({
   verifyShopifyWebhook: vi.fn(),
-  resolvePaymentSession: vi.fn(),
+  markOrderAsPaid: vi.fn(),
+  addOrderNote: vi.fn(),
   getShopifyProducts: vi.fn(),
 }));
 
@@ -45,25 +46,25 @@ import {
   createPaymentPreference,
   getPaymentStatus,
 } from "@/lib/mercadopago";
-import { verifyShopifyWebhook, resolvePaymentSession } from "@/lib/shopify";
+import { verifyShopifyWebhook, markOrderAsPaid, addOrderNote } from "@/lib/shopify";
 import { convertUsdToCop } from "@/lib/currency";
 
-describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", () => {
+describe("E2E: Flujo completo orden Shopify → MercadoPago → Marcar pagada", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("procesa checkout USD → crea pago COP → aprueba → resuelve en Shopify", async () => {
+  it("recibe orden USD → convierte COP → crea preferencia MP", async () => {
     const amountUsd = 85.5;
     const rate = 4200;
     const expectedCop = convertUsdToCop(amountUsd, rate);
 
-    // --- PASO 1: Shopify envía webhook de checkout ---
+    // PASO 1: Webhook orders/create llega desde Shopify
     vi.mocked(verifyShopifyWebhook).mockReturnValue(true);
     vi.mocked(getCurrentRate).mockResolvedValue(rate);
     vi.mocked(prisma.transaction.create).mockResolvedValue({
       id: "txn-e2e-001",
-      shopifyOrderId: "ps-12345",
+      shopifyOrderId: "12345",
       amountUsd: amountUsd as any,
       exchangeRate: rate as any,
       amountCop: expectedCop as any,
@@ -78,20 +79,21 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
       initPoint: "https://www.mercadopago.com.co/checkout/v1/redirect?pref_id=mp-pref-e2e",
     });
     vi.mocked(prisma.transaction.update).mockResolvedValue({} as any);
+    vi.mocked(addOrderNote).mockResolvedValue();
 
-    // Simular el flujo del endpoint /api/payments/process
+    // Ejecutar flujo
     const hmacValid = verifyShopifyWebhook("body", "hmac");
     expect(hmacValid).toBe(true);
 
     const currentRate = await getCurrentRate();
     const copAmount = convertUsdToCop(amountUsd, currentRate);
-    // 85.5 × 4200 = 359,100 → Math.round(359100/100)*100 = 359,100
+    // 85.5 × 4200 = 359,100
     expect(copAmount).toBe(359100);
 
     const txn = await prisma.transaction.create({
       data: {
-        shopifyOrderId: "ps-12345",
-        amountUsd: amountUsd,
+        shopifyOrderId: "12345",
+        amountUsd,
         exchangeRate: rate,
         amountCop: copAmount,
         status: "pending",
@@ -100,9 +102,9 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
 
     const pref = await createPaymentPreference({
       transactionId: txn.id,
-      title: "Orden Shopify #ps-12345",
+      title: "Orden #1001",
       amountCop: copAmount,
-      shopifyOrderId: "ps-12345",
+      shopifyOrderId: "12345",
     });
 
     expect(pref.initPoint).toContain("mercadopago.com");
@@ -111,19 +113,19 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
     );
   });
 
-  it("flujo completo: checkout → conversión → pago → webhook → resolución", async () => {
+  it("flujo completo: orden → conversión → pago → webhook → marcar pagada", async () => {
     const amountUsd = 100;
     const rate = 4150;
-    const expectedCop = convertUsdToCop(amountUsd, rate); // 100 × 4150 = 415,000
+    const expectedCop = convertUsdToCop(amountUsd, rate); // 415,000
 
-    // PASO 1: Checkout llega desde Shopify
+    // PASO 1: Orden llega desde Shopify
     vi.mocked(verifyShopifyWebhook).mockReturnValue(true);
     vi.mocked(getCurrentRate).mockResolvedValue(rate);
 
     const txnId = "txn-full-e2e";
     vi.mocked(prisma.transaction.create).mockResolvedValue({
       id: txnId,
-      shopifyOrderId: "ps-99999",
+      shopifyOrderId: "99999",
       amountUsd: amountUsd as any,
       exchangeRate: rate as any,
       amountCop: expectedCop as any,
@@ -138,14 +140,14 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
       preferenceId: "mp-full-e2e",
       initPoint: "https://www.mercadopago.com.co/checkout/v1/redirect?pref_id=mp-full-e2e",
     });
+    vi.mocked(addOrderNote).mockResolvedValue();
 
-    // Ejecutar paso 1
     const copAmount = convertUsdToCop(amountUsd, await getCurrentRate());
     expect(copAmount).toBe(415000);
 
     const txn = await prisma.transaction.create({
       data: {
-        shopifyOrderId: "ps-99999",
+        shopifyOrderId: "99999",
         amountUsd,
         exchangeRate: rate,
         amountCop: copAmount,
@@ -155,9 +157,9 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
 
     const pref = await createPaymentPreference({
       transactionId: txn.id,
-      title: "Orden Shopify #ps-99999",
+      title: "Orden #1002",
       amountCop: copAmount,
-      shopifyOrderId: "ps-99999",
+      shopifyOrderId: "99999",
     });
 
     expect(pref.initPoint).toContain("mercadopago.com.co");
@@ -167,14 +169,14 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
       id: 123456,
       status: "approved",
       statusDetail: "accredited",
-      externalReference: "ps-99999",
+      externalReference: "99999",
       transactionAmount: copAmount,
       metadata: { transaction_id: txnId },
     });
 
     vi.mocked(prisma.transaction.findFirst).mockResolvedValue({
       id: txnId,
-      shopifyOrderId: "ps-99999",
+      shopifyOrderId: "99999",
       amountUsd: amountUsd as any,
       exchangeRate: rate as any,
       amountCop: copAmount as any,
@@ -185,9 +187,9 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
       updatedAt: new Date(),
     });
 
-    vi.mocked(resolvePaymentSession).mockResolvedValue();
+    vi.mocked(markOrderAsPaid).mockResolvedValue();
+    vi.mocked(prisma.transaction.update).mockResolvedValue({} as any);
 
-    // Simular webhook
     const paymentInfo = await getPaymentStatus("123456");
     expect(paymentInfo.status).toBe("approved");
 
@@ -195,51 +197,43 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
       where: { shopifyOrderId: paymentInfo.externalReference! },
     });
     expect(foundTxn).not.toBeNull();
-    expect(foundTxn!.id).toBe(txnId);
 
-    // Actualizar estado
-    await prisma.transaction.update({
-      where: { id: txnId },
-      data: { status: "approved", mpPaymentId: "123456" },
+    // PASO 3: Marcar orden como pagada en Shopify
+    await markOrderAsPaid({
+      orderId: "99999",
+      amountCop: copAmount,
+      mpPaymentId: "123456",
     });
 
-    // PASO 3: Resolver sesión en Shopify
-    await resolvePaymentSession({
-      paymentSessionId: "ps-99999",
-      gid: "gid://shopify/PaymentSession/ps-99999",
-      action: "resolve",
-    });
-
-    expect(resolvePaymentSession).toHaveBeenCalledWith(
+    expect(markOrderAsPaid).toHaveBeenCalledWith(
       expect.objectContaining({
-        action: "resolve",
-        paymentSessionId: "ps-99999",
+        orderId: "99999",
+        amountCop: 415000,
       })
     );
 
-    // Verificar cadena completa de conversión
-    expect(createPaymentPreference).toHaveBeenCalledWith(
-      expect.objectContaining({
-        amountCop: 415000, // USD 100 × 4150 = COP 415,000
-      })
-    );
+    // Verificar nota de confirmación
+    await addOrderNote({
+      orderId: "99999",
+      note: expect.stringContaining("Pago confirmado") as any,
+    });
   });
 
-  it("flujo de rechazo: pago rechazado → Shopify reject", async () => {
+  it("flujo de rechazo: pago rechazado → nota en orden", async () => {
     const txnId = "txn-reject";
 
     vi.mocked(getPaymentStatus).mockResolvedValue({
       id: 789,
       status: "rejected",
       statusDetail: "cc_rejected_insufficient_amount",
-      externalReference: "ps-reject",
+      externalReference: "order-reject",
       transactionAmount: 200000,
       metadata: { transaction_id: txnId },
     });
 
     vi.mocked(prisma.transaction.findFirst).mockResolvedValue({
       id: txnId,
-      shopifyOrderId: "ps-reject",
+      shopifyOrderId: "order-reject",
       amountUsd: 50 as any,
       exchangeRate: 4000 as any,
       amountCop: 200000 as any,
@@ -250,33 +244,24 @@ describe("E2E: Flujo completo de pago Shopify → MercadoPago → Resolución", 
       updatedAt: new Date(),
     });
 
-    vi.mocked(resolvePaymentSession).mockResolvedValue();
+    vi.mocked(addOrderNote).mockResolvedValue();
     vi.mocked(prisma.transaction.update).mockResolvedValue({} as any);
 
     const paymentInfo = await getPaymentStatus("789");
     expect(paymentInfo.status).toBe("rejected");
 
-    // Actualizar con error
-    await prisma.transaction.update({
-      where: { id: txnId },
-      data: {
-        status: "rejected",
-        errorDetail: `${paymentInfo.status}: ${paymentInfo.statusDetail}`,
-      },
+    // NO debe llamar markOrderAsPaid para rechazos
+    expect(markOrderAsPaid).not.toHaveBeenCalled();
+
+    // Debe agregar nota de rechazo
+    await addOrderNote({
+      orderId: "order-reject",
+      note: `Pago rechazado: ${paymentInfo.statusDetail}`,
     });
 
-    // Rechazar en Shopify
-    await resolvePaymentSession({
-      paymentSessionId: "ps-reject",
-      gid: "gid://shopify/PaymentSession/ps-reject",
-      action: "reject",
-      reason: `MercadoPago: ${paymentInfo.statusDetail}`,
-    });
-
-    expect(resolvePaymentSession).toHaveBeenCalledWith(
+    expect(addOrderNote).toHaveBeenCalledWith(
       expect.objectContaining({
-        action: "reject",
-        reason: "MercadoPago: cc_rejected_insufficient_amount",
+        orderId: "order-reject",
       })
     );
   });
@@ -286,18 +271,16 @@ describe("E2E: Seguridad", () => {
   it("HMAC SHA-256 consistente para validación Shopify", () => {
     const secret = "shopify-webhook-secret-123";
     const payload = JSON.stringify({
-      id: "ps-123",
-      amount: "65.00",
+      id: 12345,
+      total_price: "65.00",
       currency: "USD",
     });
 
-    // Generar HMAC como lo haría Shopify
     const hmac = crypto
       .createHmac("sha256", secret)
       .update(payload, "utf8")
       .digest("base64");
 
-    // Verificar que se puede recalcular
     const verify = crypto
       .createHmac("sha256", secret)
       .update(payload, "utf8")

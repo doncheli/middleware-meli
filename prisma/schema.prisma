@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TransactionStatus {
+  pending
+  processing
+  approved
+  rejected
+  refunded
+  error
+}
+
+model ExchangeRate {
+  id           String   @id @default(uuid())
+  fromCurrency String   @map("from_currency") @db.VarChar(3)
+  toCurrency   String   @map("to_currency") @db.VarChar(3)
+  rate         Decimal  @db.Decimal(12, 4)
+  source       String   @db.VarChar(100)
+  fetchedAt    DateTime @map("fetched_at")
+  validUntil   DateTime @map("valid_until")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([fromCurrency, toCurrency, fetchedAt])
+  @@map("exchange_rates")
+}
+
+model Transaction {
+  id             String            @id @default(uuid())
+  shopifyOrderId String            @map("shopify_order_id")
+  amountUsd      Decimal           @map("amount_usd") @db.Decimal(10, 2)
+  exchangeRate   Decimal           @map("exchange_rate") @db.Decimal(12, 4)
+  amountCop      Decimal           @map("amount_cop") @db.Decimal(12, 0)
+  mpPaymentId    String?           @map("mp_payment_id")
+  status         TransactionStatus @default(pending)
+  errorDetail    String?           @map("error_detail")
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+
+  @@index([shopifyOrderId])
+  @@index([mpPaymentId])
+  @@index([status])
+  @@map("transactions")
+}
+
+model ProductCache {
+  id               String   @id @default(uuid())
+  shopifyProductId String   @unique @map("shopify_product_id")
+  shopifyVariantId String?  @map("shopify_variant_id")
+  title            String
+  description      String?  @db.Text
+  priceUsd         Decimal  @map("price_usd") @db.Decimal(10, 2)
+  priceCop         Decimal  @map("price_cop") @db.Decimal(12, 0)
+  imageUrl         String?  @map("image_url")
+  availability     String   @default("in stock")
+  lastSynced       DateTime @map("last_synced")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("products_cache")
+}

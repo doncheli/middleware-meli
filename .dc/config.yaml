@@ -1,0 +1,34 @@
+proyecto:
+  nombre: "Middleware-Meli"
+  tipo: servicio
+  descripcion: "Middleware de integración Shopify → MercadoPago con conversión USD→COP y feeds multi-canal"
+  creado: "2026-04-05"
+
+framework:
+  version: "1.0"
+  idioma: es
+  nivel_complejidad: auto
+
+stack:
+  runtime: "Node.js 20+"
+  framework: "Next.js 14 (App Router)"
+  lenguaje: "TypeScript"
+  hosting: "Vercel"
+  base_datos: "Vercel Postgres (Neon)"
+  cache: "Vercel KV (Redis)"
+  orm: "Prisma"
+  exchange_rate_api: "exchangerate-api.com"
+  actualizacion_tasa: "cron 2x/día (07:00 AM, 06:00 PM COT)"
+
+integraciones:
+  - shopify_payments_api
+  - mercadopago_api_rest
+  - facebook_catalog_feed
+  - instagram_shop_feed
+  - tiktok_shop_feed
+  - mercadolibre_format_compat
+
+calidad:
+  coverage_minimo: 85
+  linter: true
+  tests_antes_de_commit: true
